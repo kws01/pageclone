@@ -1,0 +1,732 @@
+import type { ExtractedPage, ImageCandidate, PageFacts } from "@/parser/extractPage";
+import { filterProductImages, classifyImage, scoreImageCandidate } from "@/parser/extractPage";
+import { callGeminiJson, isGeminiConfigured } from "@/services/geminiClient";
+
+export type FieldSource = "extracted" | "ai" | "missing";
+
+export interface PackageOption {
+  title: string;
+  description: string;
+  priceLabel: string;
+  badge: string;
+  popular: boolean;
+  price?: string | null;
+  perUnit?: string | null;
+}
+
+export interface FaqItem {
+  question: string;
+  answer: string;
+}
+
+export interface Testimonial {
+  name: string;
+  location: string;
+  text: string;
+}
+
+export interface ArticleBlock {
+  heading: string;
+  body: string;
+}
+
+export type DetailIcon = 'shield' | 'leaf' | 'moon' | 'zap' | 'heart' | 'brain' | 'droplet' | 'sparkles' | 'layers' | 'bed' | 'thermometer';
+
+export const VALID_ICONS: DetailIcon[] = ['shield', 'leaf', 'moon', 'zap', 'heart', 'brain', 'droplet', 'sparkles', 'layers', 'bed', 'thermometer'];
+
+export interface FooterLinks {
+  privacy?: string;
+  terms?: string;
+  contact?: string;
+}
+
+export interface ProductDetailCard {
+  title: string;
+  description: string;
+  icon: string;
+}
+
+export interface Review {
+  author: string;
+  text: string;
+  rating?: string;
+  location?: string;
+}
+
+export interface EditorialAnalysis {
+  pros: string[];
+  cons: string[];
+}
+
+export interface ComparisonRow {
+  criterion: string;
+  product: string;
+  traditional: string;
+  winner: 'product' | 'traditional' | 'equal';
+}
+
+export interface SalesPageData {
+  productName: string;
+  niche: string;
+  nicheKeyword: string;
+  topBarLabel: string;
+  hookHeadline: string;
+  hookSubheadline: string;
+  painPoints: string[];
+  bullets: string[];
+  objectionBusters: string[];
+  productIntro: string;
+  benefits: string[];
+  articleBlocks: ArticleBlock[];
+  productDetailCards: ProductDetailCard[];
+  productImages: string[];
+  imageCandidates: ImageCandidate[];
+  logoImage: string;
+  heroImage: string | null;
+  productHeroImage: string | null;
+  mediaLogos: string[];
+  showMediaLogos: boolean;
+  packages: PackageOption[];
+  guaranteeText: string;
+  guaranteeDays: number | null;
+  faqItems: FaqItem[];
+  testimonials: Testimonial[];
+  rating: string | null;
+  ctaText: string;
+  headerCtaText: string;
+  ctaUrl: string;
+  urgencyText: string;
+  disclaimer: string;
+  lang: string;
+  pullQuote: string;
+  footerLinks: FooterLinks;
+  unitSingular: string;
+  unitPlural: string;
+  fieldSources: Record<string, FieldSource>;
+  reviews: Review[];
+  editorialAnalysis: EditorialAnalysis | null;
+  comparisonRows: ComparisonRow[];
+  isForYou: string[];
+  eveningScene: string;
+  competitorName: string;
+  showPackageThumbnails: boolean;
+  manualGuaranteeDays: number | null;
+  manualShippingNotes: string;
+  manualRatingSource: string;
+  adProductName?: string;
+}
+
+const DEFAULT_MODEL = "gemini-3.8-flash";
+
+function getApiKey(): string {
+  return (import.meta.env.VITE_GEMINI_API_KEY || "").trim();
+}
+
+export function isAiConfigured(): boolean {
+  return isGeminiConfigured();
+}
+
+const DISCLAIMER_TEXT = "This site is an independent portal for informational content and commercial recommendations. The information on this page is educational and does not replace guidance from qualified professionals. To check guarantee conditions, prices, and official availability, please visit the manufacturer's website.";
+
+function buildImageList(candidates: ImageCandidate[]): ImageCandidate[] {
+  const scored = candidates
+    .map((c) => ({ c, score: scoreImageCandidate(c) }))
+    .sort((a, b) => b.score - a.score);
+  return scored.slice(0, 8).map(({ c }) => c);
+}
+
+function formatImageList(candidates: ImageCandidate[]): string {
+  if (candidates.length === 0) return "none";
+  return candidates
+    .map((c) => {
+      const dims = c.w && c.h ? `${c.w}x${c.h}` : "unknown";
+      return `img_${parseInt(c.id.replace("img_", ""), 10)}: ${dims} | alt: ${c.alt || "(empty)"} | section: ${c.section} | heading: ${c.heading || "(none)"} | text: ${c.nearbyText.slice(0, 100)}`;
+    })
+    .join("\n");
+}
+
+function factsToJson(facts: PageFacts): string {
+  return JSON.stringify(facts, null, 2);
+}
+
+function buildPrompt(page: ExtractedPage, affiliateUrl: string, candidates: ImageCandidate[], facts: PageFacts): string {
+  const topCandidates = buildImageList(candidates);
+  const imageList = formatImageList(topCandidates);
+  const candidateIds = topCandidates.map((c) => c.id).join(", ");
+  const factsJson = factsToJson(facts);
+
+  const textContent = [
+    `Product Title: ${page.title}`,
+    `Headline: ${page.headline}`,
+    `Subheadline: ${page.subheadline}`,
+    `Description: ${page.description}`,
+    `Benefits: ${page.benefits.slice(0, 8).join(" | ")}`,
+    `Real Testimonials from page (use these if available): ${facts.testimonials.map((t) => `${t.name}: ${t.text}`).join(" || ")}`,
+    `CTAs: ${page.ctas.map((c) => c.text).join(" | ")}`,
+    `Image candidates (pick from these IDs only: ${candidateIds || "none"}):`,
+    imageList,
+    `FACTS (real extracted data — use exactly these values):`,
+    factsJson,
+    `Affiliate URL: ${affiliateUrl}`,
+  ].join("\n");
+
+  return `You are an expert Direct Response copywriter specializing in high-converting advertorial / VSL-presell landing pages, with strict compliance standards for Google Ads and Meta Ads.
+
+Analyze the following product page data and create a complete advertorial-style sales / presell landing page in the style of a special health report or consumer assessment.
+
+Return ONLY a valid JSON object (no markdown, no code fences) with these fields:
+
+{
+  "productName": "The exact product name in up to 4 words, in the strict format 'Brand + Product Type' (e.g. 'Derila Ergonomic Pillow'). The product type MUST reflect the real category extracted from the page title/H1 (e.g. pillow, supplement, cream, tool) — do NOT invent generic categories.",
+  "niche": "The market niche (e.g. health, beauty, finance, relationships, cognition, fitness)",
+  "nicheKeyword": "A short keyword phrase describing the niche topic for image search. Max 40 chars.",
+  "topBarLabel": "A discreet reader alert label for the top bar (e.g. 'SPECIAL REPORT', 'HEALTH ASSESSMENT'). Max 30 chars.",
+  "hookHeadline": "A pattern-interrupt headline with curiosity or responsible-use warning. Max 90 chars.",
+  "hookSubheadline": "A supporting sub-headline. Max 140 chars.",
+  "painPoints": ["3 to 4 specific pain points. Max 80 chars each."],
+  "bullets": ["5 to 8 clean bullet points — these are LEARNINGS from the article/report. Max 60 chars each."],
+  "objectionBusters": ["3 to 4 objection-busting statements. Max 100 chars each."],
+  "productIntro": "A 2-3 sentence natural introduction to the product. No hype.",
+  "benefits": ["4 to 6 specific PRODUCT benefits and features — NOT article learnings. Max 80 chars each. These must be distinct from bullets."],
+  "articleBlocks": [{"heading": "Section heading. Max 60 chars.", "body": "3-5 sentence paragraph. Max 400 chars."}],
+  "productDetailCards": [{"title": "Short title. Max 50 chars.", "description": "1-2 sentence explanation. Max 120 chars.", "icon": "One of: shield, leaf, moon, zap, heart, brain, droplet, sparkles, layers, bed, thermometer"}],
+  "pullQuote": "A short pull quote from the article body, or empty string if none fits.",
+  "headerCtaText": "Short header CTA button text, max 22 chars. Default: 'See Offer'.",
+  "packages": [{"title": "Package name", "description": "Short description", "priceLabel": "Label", "badge": "Badge text or empty", "popular": false}],
+  "guaranteeText": "Use exactly FACTS.guarantee.evidence if it exists. If no guarantee in FACTS, return empty string.",
+  "faqItems": [{"question": "Question. Max 80 chars.", "answer": "Clear honest answer. Max 200 chars."}],
+  "testimonials": [{"name": "Name from real testimonials", "location": "Location", "text": "Testimonial text"}],
+  "ctaText": "Persuasive CTA button text. Max 40 chars.",
+  "urgencyText": "Use ONLY data from FACTS (shipping, guarantee days, real discounts). If no relevant data in FACTS, return: 'Check the official page for current price, shipping and guarantee.' Max 80 chars. NEVER use fake scarcity like 'while supplies last', 'limited stock', 'current batch'.",
+  "lang": "Page language code (e.g. 'en', 'pt-BR'). Default 'en'.",
+  "editorialAnalysis": {"pros": ["Exactly 4 real product pros"], "cons": ["Exactly 3 honest cons (e.g. adaptation period, price without shipping, requires position alignment)"]},
+  "comparisonRows": [{"criterion": "Comparison criterion", "product": "How the product performs", "traditional": "How traditional solutions perform", "winner": "product or traditional or equal"}],
+  "isForYou": ["4 to 5 recognizable situations (e.g. 'You wake up with stiffness...', 'You toss and turn trying to find support...')"],
+  "eveningScene": "3-4 sensory sentences describing the experience of using the product tonight. No medical promises or fake urgency.",
+  "images": {"hero": "img_N or null", "product": "img_N or null", "gallery": ["img_N"]}
+}
+
+CRITICAL RULES FOR FACTS:
+- You are given a FACTS JSON object with real data extracted from the product page.
+- Use EXACTLY the values in FACTS. It is STRICTLY FORBIDDEN to invent prices, discount percentages, or guarantee terms that are not in FACTS.
+- guaranteeText: Use exactly FACTS.guarantee.evidence if it exists. If FACTS.guarantee is null, return an empty string "".
+- packages: If FACTS.offers has items, use them to build packages with real prices and discounts. If FACTS.offers is empty, generate up to 3 packages using the unit names (unitSingular/unitPlural) WITHOUT any price or discount — just quantity labels.
+- testimonials: Use ONLY the real testimonials from FACTS.testimonials. Do NOT invent names, locations, or testimonial text. If FACTS.testimonials is empty, return an empty array.
+- faqItems: Do NOT cite guarantee days or shipping timelines that are not in FACTS.
+- Do NOT invent a rating. If FACTS.rating is null, do not mention any rating.
+- urgencyText: Derive ONLY from FACTS data (real shipping times, real guarantee days, real discounts). If no relevant FACTS data, return exactly: "Check the official page for current price, shipping and guarantee."
+
+COMPLIANCE — HEALTH LANGUAGE:
+- NEVER use cure or absolute claim terms: "relieve", "cure", "treat", "heal", "eliminate pain", "clinically proven", "research shows" — unless the original page text explicitly contains and sources such claims.
+- Use supportive language instead: "designed to support", "may help promote", "engineered for comfort".
+- No fake scarcity phrases: "while supplies last", "limited stock", "current batch".
+- Dimension numbers, material specs, and guarantee days may ONLY appear if extracted with certainty in FACTS.
+
+COMPARISON TABLE:
+- Generate 5 to 6 comparisonRows comparing the product vs traditional solutions.
+- MUST include at least 1 row where winner is "traditional" (e.g. "Familiarity initial / No adaptation period").
+- Do NOT use competitor brand names. Use "Traditional Solutions" as the column header.
+
+EDITORIAL ANALYSIS:
+- Generate exactly 4 pros and 3 cons.
+- Cons must be honest and real (e.g. "2-3 night adaptation period", "Price does not include shipping", "Requires aligning position").
+- Label as "Editorial Assessment".
+
+Image selection rules:
+- hero = image of pain/problem/hook; lifestyle/people images are valid. Use null if uncertain.
+- product = image of the REAL physical product. Use null if no candidate clearly shows the product. NEVER use infographic or lifestyle for product.
+- hero and product MUST NOT be the same image.
+- All image IDs must come from the candidate list above.
+
+Other rules:
+- All text MUST be in native English.
+- bullets (Key Takeaways) = learnings from the article/report. benefits (What You Get) = product features/benefits. Keep them distinct.
+- Generate exactly 4 articleBlocks: The Hidden Problem -> Why Common Methods Fail -> The Scientific Discovery -> A Closer Look at the Solution.
+- Generate 3 to 4 productDetailCards if enough info is available; otherwise fewer. The 'icon' field MUST be one of: shield, leaf, moon, zap, heart, brain, droplet, sparkles, layers, bed, thermometer.
+- headerCtaText: Max 22 chars, default "See Offer".
+- pullQuote: If the article body contains a memorable phrase, extract it as pullQuote; otherwise return empty string.
+- SUBSTITUIR absolutos cientificos como "research reveals / studies show" por termos neutros e consultivos como "sleep specialists note / many people report".
+- Respostas do FAQ sobre calor, lavagem, materiais ou dimensoes so podem ser geradas se constarem no texto da pagina original; caso contrario, use exatamente: "Check the official page for details."
+- O tom deve ser jornalistico e consultivo no artigo, persuasivo mas honesto nas secoes de oferta.
+
+Product Data:
+${textContent}`;
+}
+
+function extractJson(text: string): unknown {
+  let cleaned = text.trim();
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const objStart = cleaned.indexOf("{");
+    const objEnd = cleaned.lastIndexOf("}");
+    if (objStart !== -1 && objEnd !== -1) {
+      return JSON.parse(cleaned.slice(objStart, objEnd + 1));
+    }
+    throw new Error("JSON invalido na resposta do modelo");
+  }
+}
+
+const NEUTRAL_PAIN_POINTS = [
+  "Looking for a solution that actually delivers on its promises?",
+  "Unsure which option is right for your specific needs?",
+  "Want to make an informed decision before committing?",
+];
+
+const NEUTRAL_BULLETS = [
+  "Designed with your specific needs in mind",
+  "Straightforward approach you can start using right away",
+  "Backed by real customer experiences",
+  "Clear, transparent information to help you decide",
+  "Available with flexible options to suit your goals",
+  "Check the official page for full details",
+];
+
+const NEUTRAL_OBJECTIONS = [
+  "Want to learn more? All the details you need are available on the official page.",
+  "Not sure if it's right for you? Check the official page for complete information.",
+  "Have questions about how it works? The official page has the full breakdown.",
+];
+
+const NOISE_SUFFIXES = [
+  "official site", "official store", "official website", "oficial",
+  "loja oficial", "site oficial", "buy now", "comprar", "home", "order now",
+];
+
+function truncateAtWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const slice = text.slice(0, max);
+  const lastSpace = slice.lastIndexOf(" ");
+  return lastSpace > 0 ? slice.slice(0, lastSpace) : slice;
+}
+
+export function cleanProductName(raw: string, fallbackTitle?: string): string {
+  let name = (typeof raw === "string" ? raw : "").replace(/\s+/g, " ").trim();
+  if (!name) {
+    const fb = (typeof fallbackTitle === "string" ? fallbackTitle : "").replace(/\s+/g, " ").trim();
+    name = fb || "Your Product";
+  }
+  const sepMatch = name.match(/^(.*?)(?:\s*[|\u2013\u2014\-:]\s.*)$/);
+  if (sepMatch && sepMatch[1].trim().length > 0) {
+    name = sepMatch[1].trim();
+  }
+  const lower = name.toLowerCase();
+  for (const suffix of NOISE_SUFFIXES) {
+    const idx = lower.lastIndexOf(suffix);
+    if (idx > 0 && idx === lower.length - suffix.length) {
+      name = name.slice(0, idx).replace(/\s+/g, " ").trim();
+      break;
+    }
+  }
+  name = name.replace(/\s+/g, " ").trim();
+  if (name.length > 60) name = truncateAtWord(name, 60);
+  if (!name) {
+    const fb = (typeof fallbackTitle === "string" ? fallbackTitle : "").replace(/\s+/g, " ").trim();
+    name = fb || "Your Product";
+  }
+  return name;
+}
+
+function packagesFromFacts(facts: PageFacts): PackageOption[] {
+  if (facts.offers.length > 0) {
+    const sorted = [...facts.offers].sort((a, b) => a.qty - b.qty);
+    return sorted.map((o, i) => ({
+      title: `${o.qty} ${o.qty === 1 ? facts.unitSingular : facts.unitPlural}`,
+      description: o.perUnit ? `${o.perUnit} per ${facts.unitSingular}` : "",
+      priceLabel: i === sorted.length - 1 ? "Best Value" : i === 0 ? "Starter" : "Most Popular",
+      badge: o.discount || "",
+      popular: i === sorted.length - 1,
+      price: o.total,
+      perUnit: o.perUnit,
+    }));
+  }
+  const unitSg = facts.unitSingular || "unit";
+  const unitPl = facts.unitPlural || "units";
+  return [
+    { title: `1 ${unitSg}`, description: "", priceLabel: "Starter", badge: "", popular: false, price: null, perUnit: null },
+    { title: `3 ${unitPl}`, description: "", priceLabel: "Most Popular", badge: "", popular: false, price: null, perUnit: null },
+    { title: `6 ${unitPl}`, description: "", priceLabel: "Best Value", badge: "", popular: true, price: null, perUnit: null },
+  ];
+}
+
+function pickFallbackHero(candidates: ImageCandidate[]): string | null {
+  const lifestyle = candidates.find((c) => classifyImage(c.src, c.alt) === "lifestyle");
+  if (lifestyle) return lifestyle.src;
+  return candidates[0]?.src || null;
+}
+
+function pickFallbackProductStrict(candidates: ImageCandidate[]): string | null {
+  const product = candidates.find((c) => classifyImage(c.src, c.alt) === "product");
+  return product ? product.src : null;
+}
+
+function buildFallbackData(page: ExtractedPage, affiliateUrl: string): SalesPageData {
+  const filteredImages = filterProductImages(page.images, page.title);
+  const candidates = page.imageCandidates || [];
+  const facts = page.facts;
+  const heroImage = pickFallbackHero(candidates);
+  let productHeroImage = pickFallbackProductStrict(candidates);
+  if (productHeroImage && productHeroImage === heroImage) productHeroImage = null;
+  const productImages = filteredImages.slice(0, 5).map((img) => img.src);
+  const packages = packagesFromFacts(facts);
+  const realTestimonials = facts.testimonials.map((t) => ({ name: t.name, location: t.location, text: t.text }));
+
+  return {
+    productName: cleanProductName(page.title || "Your Product", page.title),
+    niche: "general",
+    nicheKeyword: "wellness lifestyle",
+    topBarLabel: "SPECIAL REPORT",
+    hookHeadline: page.headline || `The ${page.title ? page.title : "Solution"} That Actually Delivers`,
+    hookSubheadline: page.subheadline || page.description || "Discover why this approach stands out.",
+    painPoints: NEUTRAL_PAIN_POINTS,
+    bullets: NEUTRAL_BULLETS,
+    objectionBusters: NEUTRAL_OBJECTIONS,
+    productIntro: "After looking at what's available, one option stands out. Here's what makes it worth considering.",
+    benefits: page.benefits.length >= 3 ? page.benefits.slice(0, 6) : NEUTRAL_BULLETS.slice(0, 4),
+    articleBlocks: [],
+    productDetailCards: [],
+    productImages,
+    imageCandidates: candidates,
+    logoImage: page.logoImage || "",
+    heroImage,
+    productHeroImage,
+    mediaLogos: page.mediaLogos || [],
+    showMediaLogos: false,
+    packages,
+    guaranteeText: facts.guarantee?.evidence || "",
+    guaranteeDays: facts.guarantee?.days ?? null,
+    faqItems: [],
+    testimonials: realTestimonials,
+    rating: facts.rating?.score || null,
+    ctaText: "Check Official Page & Claim Discount →",
+    headerCtaText: "See Offer",
+    ctaUrl: affiliateUrl,
+    urgencyText: "Check the official page for current price, shipping and guarantee.",
+    disclaimer: DISCLAIMER_TEXT,
+    lang: "en",
+    pullQuote: "",
+    footerLinks: {},
+    unitSingular: facts.unitSingular,
+    unitPlural: facts.unitPlural,
+    fieldSources: {
+      productName: "extracted",
+      hookHeadline: "extracted",
+      painPoints: "missing",
+      bullets: page.benefits.length >= 3 ? "extracted" : "missing",
+      benefits: page.benefits.length >= 3 ? "extracted" : "missing",
+      articleBlocks: "missing",
+      productDetailCards: "missing",
+      packages: facts.offers.length > 0 ? "extracted" : "missing",
+      guaranteeText: facts.guarantee ? "extracted" : "missing",
+      testimonials: realTestimonials.length > 0 ? "extracted" : "missing",
+      rating: facts.rating ? "extracted" : "missing",
+      faqItems: "missing",
+    },
+    reviews: realTestimonials.map((t) => ({ author: t.name, text: t.text, location: t.location })),
+    editorialAnalysis: null,
+    comparisonRows: [],
+    isForYou: [],
+    eveningScene: "",
+    competitorName: "",
+    showPackageThumbnails: !!productHeroImage,
+    manualGuaranteeDays: null,
+    manualShippingNotes: "",
+    manualRatingSource: "",
+  };
+}
+
+function resolveImageId(
+  id: unknown,
+  candidates: ImageCandidate[],
+): string | null {
+  if (typeof id !== "string") return null;
+  const match = id.match(/^img_(\d+)$/i);
+  if (!match) return null;
+  const num = parseInt(match[1], 10);
+  const found = candidates.find((c) => c.id === `img_${num}`);
+  return found?.src || null;
+}
+
+function stripUnverifiedPrices(
+  text: string,
+  facts: PageFacts,
+  pageText: string,
+): string {
+  if (!text) return text;
+  const knownPrices = new Set<string>();
+  for (const o of facts.offers) {
+    if (o.total) knownPrices.add(o.total.replace(/\s/g, ""));
+    if (o.perUnit) knownPrices.add(o.perUnit.replace(/\s/g, ""));
+  }
+  const knownPcts = new Set<string>();
+  for (const o of facts.offers) {
+    if (o.discount) knownPcts.add(o.discount);
+  }
+  let cleaned = text;
+  cleaned = cleaned.replace(/(?:R\$|US\$|\$|€|£)\s*\d[\d.,]*/gi, (match) => {
+    if (knownPrices.has(match.replace(/\s/g, ""))) return match;
+    if (pageText.includes(match)) return match;
+    return "";
+  });
+  cleaned = cleaned.replace(/(\d{1,2})\s*%\s*(?:off|desconto|discount|save)?/gi, (match, pct) => {
+    if (knownPcts.has(`${pct}% off`)) return match;
+    if (pageText.includes(match)) return match;
+    return "";
+  });
+  return cleaned;
+}
+
+function normalizeData(raw: unknown, page: ExtractedPage, affiliateUrl: string): SalesPageData {
+  const r = raw as Record<string, unknown>;
+  const str = (v: unknown, fallback = ""): string =>
+    typeof v === "string" ? v.trim() : fallback;
+  const arr = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x: unknown) => typeof x === "string").map((x: string) => x.trim()) : [];
+
+  const filteredImages = filterProductImages(page.images, page.title);
+  const candidates = page.imageCandidates || [];
+  const facts = page.facts;
+  const pageText = page.rawHtml || "";
+
+  const rawImages = (r.images && typeof r.images === "object") ? r.images as Record<string, unknown> : {};
+  const heroSrc = resolveImageId(rawImages.hero, candidates);
+  let productSrc = resolveImageId(rawImages.product, candidates);
+  if (productSrc && heroSrc && productSrc === heroSrc) productSrc = null;
+  if (!productSrc) productSrc = pickFallbackProductStrict(candidates);
+  if (productSrc && productSrc === heroSrc) productSrc = null;
+  const rawGalleryIds = Array.isArray(rawImages.gallery) ? rawImages.gallery : [];
+  const gallerySrcs = rawGalleryIds
+    .map((id) => resolveImageId(id, candidates))
+    .filter((s): s is string => !!s && s !== heroSrc && s !== productSrc)
+    .slice(0, 5);
+
+  const heroImage = heroSrc !== null ? heroSrc : pickFallbackHero(candidates);
+  let productHeroImage = productSrc !== null ? productSrc : null;
+  if (productHeroImage && productHeroImage === heroImage) productHeroImage = null;
+
+  const factsPackages = packagesFromFacts(facts);
+  const rawPackages = Array.isArray(r.packages) ? r.packages : [];
+  let packages: PackageOption[];
+  if (facts.offers.length > 0) {
+    packages = factsPackages;
+  } else if (rawPackages.length > 0) {
+    packages = rawPackages.slice(0, 4).map((p, i) => {
+      const pObj = p as Record<string, unknown>;
+      const title = stripUnverifiedPrices(str(pObj.title, factsPackages[i]?.title || `Package ${i + 1}`), facts, pageText);
+      const badge = stripUnverifiedPrices(str(pObj.badge, factsPackages[i]?.badge || ""), facts, pageText);
+      return {
+        title,
+        description: str(pObj.description, factsPackages[i]?.description || ""),
+        priceLabel: str(pObj.priceLabel, factsPackages[i]?.priceLabel || ""),
+        badge,
+        popular: typeof pObj.popular === "boolean" ? pObj.popular : (factsPackages[i]?.popular ?? false),
+        price: factsPackages[i]?.price ?? null,
+        perUnit: factsPackages[i]?.perUnit ?? null,
+      };
+    });
+  } else {
+    packages = factsPackages;
+  }
+
+  const rawFaq = Array.isArray(r.faqItems) ? r.faqItems : [];
+  const faqItems: FaqItem[] = rawFaq.slice(0, 5).map((f) => {
+    const fObj = f as Record<string, unknown>;
+    const answer = stripUnverifiedPrices(str(fObj.answer), facts, pageText);
+    return {
+      question: str(fObj.question),
+      answer,
+    };
+  }).filter((f) => f.question && f.answer);
+
+  const realTestimonials = facts.testimonials.map((t) => ({
+    name: t.name,
+    location: t.location,
+    text: t.text,
+  }));
+  const rawTestimonials = Array.isArray(r.testimonials) ? r.testimonials : [];
+  const aiTestimonials: Testimonial[] = rawTestimonials.slice(0, 4).map((t) => {
+    const tObj = t as Record<string, unknown>;
+    return {
+      name: str(tObj.name),
+      location: str(tObj.location),
+      text: str(tObj.text),
+    };
+  }).filter((t) => t.name && t.text);
+  const testimonials = realTestimonials.length > 0 ? realTestimonials : aiTestimonials;
+
+  const rawArticleBlocks = Array.isArray(r.articleBlocks) ? r.articleBlocks : [];
+  const articleBlocks: ArticleBlock[] = rawArticleBlocks.slice(0, 5).map((b, i) => {
+    const bObj = b as Record<string, unknown>;
+    return {
+      heading: str(bObj.heading, `Section ${i + 1}`),
+      body: str(bObj.body),
+    };
+  }).filter((b) => b.heading && b.body);
+
+  const rawDetailCards = Array.isArray(r.productDetailCards) ? r.productDetailCards : [];
+  const validIcons = new Set<string>(["shield", "leaf", "moon", "zap", "heart", "brain", "droplet", "sparkles", "layers", "bed", "thermometer"]);
+  const productDetailCards: ProductDetailCard[] = rawDetailCards.slice(0, 4).map((c, i) => {
+    const cObj = c as Record<string, unknown>;
+    const rawIcon = str(cObj.icon, "sparkles");
+    const icon = validIcons.has(rawIcon) ? rawIcon : "sparkles";
+    return {
+      title: str(cObj.title, `Card ${i + 1}`),
+      description: str(cObj.description),
+      icon,
+    };
+  }).filter((c) => c.title);
+
+  const productImages = [...filteredImages.slice(0, 5).map((img) => img.src), ...gallerySrcs];
+  const uniqueProductImages = Array.from(new Set(productImages)).slice(0, 8);
+
+  const aiGuarantee = str(r.guaranteeText);
+  const guaranteeText = aiGuarantee || facts.guarantee?.evidence || "";
+  const guaranteeDays = facts.guarantee?.days ?? null;
+
+  const rawReviews = Array.isArray(r.reviews) ? r.reviews : [];
+  const parsedReviews: Review[] = rawReviews.slice(0, 6).map((rv) => {
+    const rvObj = rv as Record<string, unknown>;
+    return {
+      author: str(rvObj.author),
+      text: str(rvObj.text),
+      rating: str(rvObj.rating) || undefined,
+      location: str(rvObj.location) || undefined,
+    };
+  }).filter((rv) => rv.author && rv.text);
+
+  const rawEditorial = r.editorialAnalysis && typeof r.editorialAnalysis === "object" ? r.editorialAnalysis as Record<string, unknown> : null;
+  const editorialAnalysis: EditorialAnalysis | null = rawEditorial
+    ? {
+        pros: arr(rawEditorial.pros).slice(0, 4),
+        cons: arr(rawEditorial.cons).slice(0, 3),
+      }
+    : null;
+  const hasValidEditorial = editorialAnalysis && (editorialAnalysis.pros.length >= 2 || editorialAnalysis.cons.length >= 2);
+
+  const rawComparisonRows = Array.isArray(r.comparisonRows) ? r.comparisonRows : [];
+  const comparisonRows: ComparisonRow[] = rawComparisonRows.slice(0, 6).map((row) => {
+    const rowObj = row as Record<string, unknown>;
+    const winner = str(rowObj.winner);
+    return {
+      criterion: str(rowObj.criterion),
+      product: str(rowObj.product),
+      traditional: str(rowObj.traditional),
+      winner: (winner === "product" || winner === "traditional" || winner === "equal" ? winner : "equal") as ComparisonRow["winner"],
+    };
+  }).filter((row) => row.criterion && row.product && row.traditional);
+
+  const isForYou = arr(r.isForYou).slice(0, 5);
+  const eveningScene = str(r.eveningScene);
+  const competitorName = str(r.competitorName);
+
+  const sources: Record<string, FieldSource> = {
+    productName: "ai",
+    niche: "ai",
+    hookHeadline: arr(r.painPoints).length > 0 ? "ai" : "missing",
+    painPoints: arr(r.painPoints).length >= 2 ? "ai" : "missing",
+    bullets: arr(r.bullets).length >= 3 ? "ai" : "missing",
+    benefits: arr(r.benefits).length >= 3 ? "ai" : (page.benefits.length >= 3 ? "extracted" : "missing"),
+    articleBlocks: articleBlocks.length > 0 ? "ai" : "missing",
+    productDetailCards: productDetailCards.length > 0 ? "ai" : "missing",
+    packages: facts.offers.length > 0 ? "extracted" : (rawPackages.length > 0 ? "ai" : "missing"),
+    guaranteeText: guaranteeText ? (facts.guarantee ? "extracted" : "ai") : "missing",
+    testimonials: testimonials.length > 0 ? (realTestimonials.length > 0 ? "extracted" : "ai") : "missing",
+    rating: facts.rating ? "extracted" : "missing",
+    faqItems: faqItems.length > 0 ? "ai" : "missing",
+  };
+
+  return {
+    productName: cleanProductName(str(r.productName, page.title), page.title),
+    niche: str(r.niche, "general"),
+    nicheKeyword: str(r.nicheKeyword, "wellness lifestyle"),
+    topBarLabel: str(r.topBarLabel, "SPECIAL REPORT"),
+    hookHeadline: str(r.hookHeadline, page.headline || page.title),
+    hookSubheadline: str(r.hookSubheadline, page.subheadline || page.description || "Discover why this approach stands out."),
+    painPoints: arr(r.painPoints).length >= 2 ? arr(r.painPoints).slice(0, 4) : NEUTRAL_PAIN_POINTS,
+    bullets: arr(r.bullets).length >= 3 ? arr(r.bullets).slice(0, 8) : NEUTRAL_BULLETS,
+    objectionBusters: arr(r.objectionBusters).length >= 2 ? arr(r.objectionBusters).slice(0, 4) : NEUTRAL_OBJECTIONS,
+    productIntro: str(r.productIntro, "After looking at what's available, one option stands out. Here's what makes it worth considering."),
+    benefits: arr(r.benefits).length >= 3 ? arr(r.benefits).slice(0, 6) : page.benefits.length >= 3 ? page.benefits.slice(0, 6) : NEUTRAL_BULLETS.slice(0, 4),
+    articleBlocks,
+    productDetailCards,
+    productImages: uniqueProductImages,
+    imageCandidates: candidates,
+    logoImage: page.logoImage || "",
+    heroImage,
+    productHeroImage,
+    mediaLogos: page.mediaLogos || [],
+    showMediaLogos: false,
+    packages,
+    guaranteeText,
+    guaranteeDays,
+    faqItems,
+    testimonials,
+    rating: facts.rating?.score || null,
+    ctaText: str(r.ctaText, page.ctas[0]?.text || "Check Official Page →"),
+    headerCtaText: str(r.headerCtaText, "See Offer").slice(0, 22),
+    ctaUrl: affiliateUrl,
+    urgencyText: str(r.urgencyText, "Check the official page for current price, shipping and guarantee."),
+    disclaimer: DISCLAIMER_TEXT,
+    lang: str(r.lang, "en"),
+    pullQuote: str(r.pullQuote),
+    footerLinks: {
+      privacy: str((r.footerLinks as Record<string, unknown>)?.privacy),
+      terms: str((r.footerLinks as Record<string, unknown>)?.terms),
+      contact: str((r.footerLinks as Record<string, unknown>)?.contact),
+    },
+    unitSingular: facts.unitSingular,
+    unitPlural: facts.unitPlural,
+    fieldSources: sources,
+    reviews: parsedReviews,
+    editorialAnalysis: hasValidEditorial ? editorialAnalysis : null,
+    comparisonRows,
+    isForYou,
+    eveningScene,
+    competitorName,
+    showPackageThumbnails: !!productHeroImage,
+    manualGuaranteeDays: null,
+    manualShippingNotes: "",
+    manualRatingSource: "",
+  };
+}
+
+export interface SalesPageResult {
+  data: SalesPageData;
+  usedFallback: boolean;
+  warning?: string;
+}
+
+export async function generateSalesPage(
+  page: ExtractedPage,
+  affiliateUrl: string,
+): Promise<SalesPageResult> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    return {
+      data: buildFallbackData(page, affiliateUrl),
+      usedFallback: true,
+      warning: "Chave VITE_GEMINI_API_KEY nao configurada. Pagina gerada com template padrao.",
+    };
+  }
+
+  const prompt = buildPrompt(page, affiliateUrl, page.imageCandidates || [], page.facts);
+
+  try {
+    const parsed = await callGeminiJson<unknown>(prompt, {
+      timeoutMs: 120000,
+      maxOutputTokens: 8192,
+      retries: 3,
+      label: "sales-page",
+    });
+    const normalized = normalizeData(parsed, page, affiliateUrl);
+    return { data: normalized, usedFallback: false };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Erro ao gerar pagina de vendas";
+    return {
+      data: buildFallbackData(page, affiliateUrl),
+      usedFallback: true,
+      warning: `IA indisponivel (${msg}). Pagina gerada com template padrao baseado no produto.`,
+    };
+  }
+}

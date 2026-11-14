@@ -1,0 +1,863 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { SiteHeader, SiteFooter } from "@/components/SiteHeader";
+import {
+  generateAds,
+  generateAdExtras,
+  isAiConfigured,
+  getCtaOptions,
+  listPlaybooks,
+  buildUtmUrl,
+  type AdInput,
+  type AdObjective,
+  type AdGenerationResult,
+  type AdCopy,
+  type VideoScript,
+  type Audience,
+  type TestPlanItem,
+} from "@/services/adCopyGenerator";
+import { auditAdText, highlightFlags, type RiskLevel, type ComplianceFlag } from "@/services/adCompliance";
+import {
+  Megaphone, Loader2, AlertCircle, Sparkles, Copy, RefreshCw, Wand2,
+  CheckCircle2, Video, Users, FlaskConical, ShieldCheck, FileText,
+  Type, Download, ExternalLink, ChevronRight,
+} from "lucide-react";
+
+const ADS_STORAGE_KEY = "pageclone:ad-input";
+const ADS_HISTORY_KEY = "pageclone:ad-history";
+const MAX_HISTORY = 10;
+
+type Tab = "primary" | "headlines" | "video" | "creative" | "audiences" | "test" | "compliance";
+
+const TABS: { id: Tab; label: string; icon: typeof Type }[] = [
+  { id: "primary", label: "Textos principais", icon: Type },
+  { id: "headlines", label: "Titulos e descricoes", icon: FileText },
+  { id: "video", label: "Roteiros de video", icon: Video },
+  { id: "creative", label: "Ideias de criativo", icon: Sparkles },
+  { id: "audiences", label: "Publicos", icon: Users },
+  { id: "test", label: "Plano de teste", icon: FlaskConical },
+  { id: "compliance", label: "Conformidade", icon: ShieldCheck },
+];
+
+function loadStoredInput(): Partial<AdInput> | null {
+  try {
+    const raw = localStorage.getItem(ADS_STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredInput(input: AdInput) {
+  try {
+    localStorage.setItem(ADS_STORAGE_KEY, JSON.stringify(input));
+  } catch {
+    // ignore
+  }
+}
+
+function loadHistory(): AdGenerationResult[] {
+  try {
+    const raw = localStorage.getItem(ADS_HISTORY_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+function saveToHistory(result: AdGenerationResult) {
+  try {
+    const hist = loadHistory();
+    hist.unshift(result);
+    localStorage.setItem(ADS_HISTORY_KEY, JSON.stringify(hist.slice(0, MAX_HISTORY)));
+  } catch {
+    // ignore
+  }
+}
+
+const RISK_STYLES: Record<RiskLevel, { bg: string; text: string; label: string }> = {
+  verde: { bg: "bg-emerald-100", text: "text-emerald-700", label: "Verde" },
+  amarelo: { bg: "bg-amber-100", text: "text-amber-700", label: "Amarelo" },
+  vermelho: { bg: "bg-red-100", text: "text-red-700", label: "Vermelho" },
+};
+
+export default function AdsGenerator() {
+  const navigate = useNavigate();
+  const stored = useMemo(() => loadStoredInput(), []);
+
+  const [productName, setProductName] = useState(stored?.productName || "");
+  const [niche, setNiche] = useState(stored?.niche || "");
+  const [description, setDescription] = useState(stored?.description || "");
+  const [language, setLanguage] = useState(stored?.language || "pt");
+  const [landingHeadline, setLandingHeadline] = useState(stored?.landingHeadline || "");
+  const [firstQuestion, setFirstQuestion] = useState(stored?.firstQuestion || "");
+  const [benefits, setBenefits] = useState((stored?.benefits || []).join("\n"));
+  const [painPoints, setPainPoints] = useState((stored?.painPoints || []).join("\n"));
+  const [factPrice, setFactPrice] = useState(stored?.offerFacts?.price || "");
+  const [factGuarantee, setFactGuarantee] = useState(stored?.offerFacts?.guarantee || "");
+  const [factShipping, setFactShipping] = useState(stored?.offerFacts?.shipping || "");
+  const [factProofs, setFactProofs] = useState((stored?.offerFacts?.proofs || []).join("\n"));
+  const [ctaUrl, setCtaUrl] = useState(stored?.ctaUrl || "");
+  const [objective, setObjective] = useState<AdObjective>("traffic");
+  const [tone, setTone] = useState("direto-honesto");
+  const [count, setCount] = useState(4);
+  const [playbookId, setPlaybookId] = useState<string>("");
+  const [extraAvoidText, setExtraAvoidText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<AdGenerationResult | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>("primary");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [extras, setExtras] = useState<{ videoScripts: VideoScript[]; audiences: Audience[]; testPlan: TestPlanItem[] } | null>(null);
+  const [extrasLoading, setExtrasLoading] = useState(false);
+  const [utmCampaign, setUtmCampaign] = useState("");
+  const [utmContent, setUtmContent] = useState("");
+
+  const onGenerate = useCallback(async () => {
+    setError("");
+    if (!productName.trim()) {
+      setError("Insira o nome do produto.");
+      return;
+    }
+    setLoading(true);
+    setResult(null);
+    try {
+      const input: AdInput = {
+        source: stored?.source || "manual",
+        productName: productName.trim(),
+        niche: niche.trim(),
+        language: language.trim(),
+        landingHeadline: landingHeadline.trim(),
+        firstQuestion: firstQuestion.trim() || undefined,
+        benefits: benefits.split("\n").map((b) => b.trim()).filter(Boolean),
+        painPoints: painPoints.split("\n").map((p) => p.trim()).filter(Boolean),
+        offerFacts: {
+          price: factPrice.trim() || undefined,
+          guarantee: factGuarantee.trim() || undefined,
+          shipping: factShipping.trim() || undefined,
+          proofs: factProofs.split("\n").map((p) => p.trim()).filter(Boolean),
+        },
+        ctaUrl: ctaUrl.trim() || undefined,
+        description: description.trim() || undefined,
+      };
+      saveStoredInput(input);
+      const extraAvoid = extraAvoidText.split("\n").map((w) => w.trim()).filter(Boolean);
+      const res = await generateAds({ input, objective, tone, count, playbookId: playbookId || undefined, extraAvoid });
+      setResult(res);
+      if (res.playbookId) setPlaybookId(res.playbookId);
+      saveToHistory(res);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao gerar anuncios");
+    } finally {
+      setLoading(false);
+    }
+  }, [productName, niche, description, language, landingHeadline, firstQuestion, benefits, painPoints, factPrice, factGuarantee, factShipping, factProofs, ctaUrl, objective, tone, count, playbookId, extraAvoidText, stored?.source]);
+
+  const onCopy = useCallback((id: string, text: string) => {
+    try {
+      navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const onRegenerate = useCallback(() => {
+    onGenerate();
+  }, [onGenerate]);
+
+  const onAutoFix = useCallback((adIndex: number) => {
+    if (!result) return;
+    const ad = result.ads[adIndex];
+    const audit = result.audits[adIndex];
+    if (!ad || !audit || audit.flags.length === 0) return;
+    let fixedText = ad.primaryText;
+    for (const flag of audit.flags) {
+      const re = new RegExp(flag.phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+      fixedText = fixedText.replace(re, "");
+    }
+    fixedText = fixedText.replace(/\s{2,}/g, " ").trim();
+    const newAds = [...result.ads];
+    newAds[adIndex] = { ...ad, primaryText: fixedText };
+    const newAudits = newAds.map((a) => auditAdText(`${a.primaryText} ${a.headline} ${a.description}`, language, result.brief.verifiedFacts));
+    setResult({ ...result, ads: newAds, audits: newAudits });
+  }, [result, language]);
+
+  const utmUrl = useMemo(() => {
+    if (!ctaUrl) return "";
+    return buildUtmUrl(ctaUrl, utmCampaign || productName || "ad_campaign", utmContent || undefined);
+  }, [ctaUrl, utmCampaign, productName, utmContent]);
+
+  const onExport = useCallback((format: "txt" | "csv" | "json") => {
+    if (!result) return;
+    let content = "";
+    let mime = "text/plain";
+    let ext = "txt";
+    if (format === "json") {
+      content = JSON.stringify(result, null, 2);
+      mime = "application/json";
+      ext = "json";
+    } else if (format === "csv") {
+      const rows = [["id", "angle", "length", "headline", "description", "cta", "primaryText", "riskLevel"]];
+      result.ads.forEach((a, i) => {
+        rows.push([a.id, a.angle, a.length, a.headline, a.description, a.cta, a.primaryText.replace(/"/g, '""'), result.audits[i]?.riskLevel || "verde"]);
+      });
+      content = rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n");
+      mime = "text/csv";
+      ext = "csv";
+    } else {
+      content = result.ads.map((a, i) => {
+        const audit = result.audits[i];
+        return `--- Anuncio ${i + 1} [${audit?.riskLevel || "verde"}] ---\nAngulo: ${a.angle}\nTamanho: ${a.length}\nHook: ${a.hook}\n\nPrimary Text:\n${a.primaryText}\n\nHeadline: ${a.headline}\nDescription: ${a.description}\nCTA: ${a.cta}\nCreative: ${a.creativeIdea}\n`;
+      }).join("\n\n");
+    }
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `anuncios-${productName || "export"}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, [result, productName]);
+
+  const onGenerateExtras = useCallback(async () => {
+    if (!result) return;
+    setExtrasLoading(true);
+    try {
+      const ex = await generateAdExtras(result.brief, result.ads, {
+        source: stored?.source || "manual",
+        productName: productName.trim(),
+        niche: niche.trim(),
+        language: language.trim(),
+        landingHeadline: landingHeadline.trim(),
+        firstQuestion: firstQuestion.trim() || undefined,
+        benefits: benefits.split("\n").map((b) => b.trim()).filter(Boolean),
+        painPoints: painPoints.split("\n").map((p) => p.trim()).filter(Boolean),
+        offerFacts: {
+          price: factPrice.trim() || undefined,
+          guarantee: factGuarantee.trim() || undefined,
+          shipping: factShipping.trim() || undefined,
+          proofs: factProofs.split("\n").map((p) => p.trim()).filter(Boolean),
+        },
+        ctaUrl: ctaUrl.trim() || undefined,
+        description: description.trim() || undefined,
+      });
+      setExtras(ex);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao gerar extras");
+    } finally {
+      setExtrasLoading(false);
+    }
+  }, [result, productName, niche, language, landingHeadline, firstQuestion, benefits, painPoints, factPrice, factGuarantee, factShipping, factProofs, ctaUrl, description, stored?.source]);
+
+  const allowedCtas = useMemo(() => getCtaOptions(language), [language]);
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <SiteHeader />
+      <main className="flex-1 container mx-auto px-4 py-6">
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+            <Megaphone className="h-6 w-6 text-brand" />
+            Gerador de Anuncios Meta Ads
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Crie anuncios para Facebook/Instagram a partir do seu quiz ou pagina de vendas.
+          </p>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-[380px_1fr] lg:items-start">
+          <aside className="space-y-4 lg:sticky lg:top-4">
+            <div className="rounded-xl border border-border bg-card p-4">
+              <h3 className="text-sm font-semibold mb-3">Dados do Produto</h3>
+              <div className="space-y-3">
+                <InputField label="Nome do produto" value={productName} onChange={setProductName} placeholder="Ex: Derila Ergonomic Pillow" />
+                <InputField label="Nicho" value={niche} onChange={setNiche} placeholder="Ex: saude_bem_estar" />
+                <div>
+                  <span className="block text-xs text-muted-foreground mb-1">Descricao (opcional)</span>
+                  <textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    rows={2}
+                    placeholder="Breve descricao do produto"
+                    className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand"
+                  />
+                </div>
+                <div>
+                  <span className="block text-xs text-muted-foreground mb-1">Idioma</span>
+                  <select
+                    value={language}
+                    onChange={(e) => setLanguage(e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand"
+                  >
+                    <option value="pt">Portugues (pt)</option>
+                    <option value="en">English (en)</option>
+                    <option value="es">Espanol (es)</option>
+                  </select>
+                </div>
+                <InputField label="Headline da landing page" value={landingHeadline} onChange={setLandingHeadline} placeholder="A headline do quiz/pagina" />
+                <InputField label="Primeira pergunta (se quiz)" value={firstQuestion} onChange={setFirstQuestion} placeholder="Pergunta inicial do quiz" />
+                <div>
+                  <span className="block text-xs text-muted-foreground mb-1">Beneficios (um por linha)</span>
+                  <textarea
+                    value={benefits}
+                    onChange={(e) => setBenefits(e.target.value)}
+                    rows={3}
+                    placeholder="Beneficio 1&#10;Beneficio 2"
+                    className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand"
+                  />
+                </div>
+                <div>
+                  <span className="block text-xs text-muted-foreground mb-1">Pontos de dor (um por linha)</span>
+                  <textarea
+                    value={painPoints}
+                    onChange={(e) => setPainPoints(e.target.value)}
+                    rows={3}
+                    placeholder="Dor 1&#10;Dor 2"
+                    className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <h3 className="text-sm font-semibold mb-2 flex items-center gap-2 text-amber-800">
+                <ShieldCheck className="h-4 w-4" />
+                Fatos verificados
+              </h3>
+              <p className="text-xs text-amber-700 mb-3">
+                A IA so usara estes fatos. Se estiver vazio, ela nao citara preco, prazo, numeros ou depoimentos.
+              </p>
+              <div className="space-y-2">
+                <InputField label="Preco" value={factPrice} onChange={setFactPrice} placeholder="Ex: R$ 197" />
+                <InputField label="Garantia" value={factGuarantee} onChange={setFactGuarantee} placeholder="Ex: 90 dias" />
+                <InputField label="Frete" value={factShipping} onChange={setFactShipping} placeholder="Ex: Gratis para todo Brasil" />
+                <div>
+                  <span className="block text-xs text-amber-700 mb-1">Provas reais (uma por linha)</span>
+                  <textarea
+                    value={factProofs}
+                    onChange={(e) => setFactProofs(e.target.value)}
+                    rows={2}
+                    placeholder="Selos, certificacoes, dados reais"
+                    className="w-full resize-y rounded-md border border-amber-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border bg-card p-4">
+              <h3 className="text-sm font-semibold mb-3">Opcoes de Geracao</h3>
+              <div className="space-y-3">
+                <InputField label="URL do CTA (afiliado)" value={ctaUrl} onChange={setCtaUrl} placeholder="https://..." />
+                <div>
+                  <span className="block text-xs text-muted-foreground mb-1">Objetivo</span>
+                  <select
+                    value={objective}
+                    onChange={(e) => setObjective(e.target.value as AdObjective)}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand"
+                  >
+                    <option value="traffic">Trafego para o quiz</option>
+                    <option value="conversion">Conversao</option>
+                  </select>
+                </div>
+                <InputField label="Tom de voz" value={tone} onChange={setTone} placeholder="Ex: direto-honesto" />
+                <div>
+                  <span className="block text-xs text-muted-foreground mb-1">Numero de variacoes (3-12)</span>
+                  <input
+                    type="number"
+                    min={3}
+                    max={12}
+                    value={count}
+                    onChange={(e) => setCount(Math.max(3, Math.min(12, parseInt(e.target.value) || 3)))}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={onGenerate}
+                  disabled={loading}
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-brand px-3 py-2.5 text-sm font-medium text-brand-foreground hover:opacity-90 disabled:opacity-60"
+                >
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  {loading ? "Gerando anuncios..." : "Gerar Anuncios com IA"}
+                </button>
+                {!isAiConfigured() && !error && (
+                  <p className="text-xs text-amber-600">
+                    Sem chave de IA configurada, os anuncios serao gerados com template basico.
+                  </p>
+                )}
+                {error && (
+                  <div className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive">
+                    <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" /> {error}
+                  </div>
+                )}
+              </div>
+            </div>
+          </aside>
+
+          <section className="min-w-0">
+            {!result && !loading && (
+              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/20 p-16 text-center" style={{ minHeight: 400 }}>
+                <Megaphone className="h-12 w-12 text-muted-foreground mb-4" />
+                <h2 className="text-lg font-semibold">Nenhum anuncio gerado ainda</h2>
+                <p className="mt-2 text-sm text-muted-foreground max-w-sm">
+                  Preencha os dados do produto a esquerda e clique em gerar. A IA criara variacoes de anuncios para Facebook/Instagram.
+                </p>
+              </div>
+            )}
+
+            {loading && (
+              <div className="flex flex-col items-center justify-center rounded-xl border border-border bg-muted/20 p-16 text-center" style={{ minHeight: 400 }}>
+                <Loader2 className="h-10 w-10 animate-spin text-brand mb-4" />
+                <h2 className="text-lg font-semibold">Gerando anuncios com IA...</h2>
+                <p className="mt-2 text-sm text-muted-foreground">Construindo brief, gerando copys e auditando conformidade.</p>
+              </div>
+            )}
+
+            {result && (
+              <div className="space-y-4">
+                {result.warning && (
+                  <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                    <span>{result.warning}</span>
+                  </div>
+                )}
+
+                <div className="rounded-xl border border-border bg-card p-3 flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground mr-auto">
+                    <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+                    {result.ads.length} anuncios · {result.videoScripts.length} roteiros · {result.audiences.length} publicos
+                  </div>
+                  <button onClick={() => onExport("txt")} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-xs font-medium transition hover:bg-accent">
+                    <Download className="h-3.5 w-3.5" /> .txt
+                  </button>
+                  <button onClick={() => onExport("csv")} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-xs font-medium transition hover:bg-accent">
+                    <Download className="h-3.5 w-3.5" /> .csv
+                  </button>
+                  <button onClick={() => onExport("json")} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-xs font-medium transition hover:bg-accent">
+                    <Download className="h-3.5 w-3.5" /> .json
+                  </button>
+                  {!extras && !extrasLoading && (
+                    <button onClick={onGenerateExtras} className="inline-flex items-center gap-2 rounded-md border border-brand/30 bg-brand/5 px-3 py-2 text-xs font-medium text-brand transition hover:bg-brand/10">
+                      <Video className="h-3.5 w-3.5" /> Gerar roteiros, publicos e plano de teste
+                    </button>
+                  )}
+                  {extrasLoading && (
+                    <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Gerando extras...
+                    </span>
+                  )}
+                </div>
+
+                {/* UTM Generator */}
+                <div className="rounded-xl border border-border bg-card p-4">
+                  <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                    <ExternalLink className="h-4 w-4 text-brand" />
+                    Gerador de URL com UTMs
+                  </h3>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <InputField label="utm_campaign" value={utmCampaign} onChange={setUtmCampaign} placeholder={productName || "ad_campaign"} />
+                    <InputField label="utm_content (opcional)" value={utmContent} onChange={setUtmContent} placeholder="ad1_static" />
+                  </div>
+                  {utmUrl && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <code className="flex-1 text-xs bg-muted/30 rounded-md px-3 py-2 break-all">{utmUrl}</code>
+                      <button onClick={() => onCopy("utm", utmUrl)} className="shrink-0 rounded-md border border-border p-2 hover:bg-accent transition">
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Tabs */}
+                <div className="rounded-xl border border-border bg-card p-2">
+                  <div className="flex flex-wrap gap-1">
+                    {TABS.map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setActiveTab(tab.id)}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-colors ${
+                          activeTab === tab.id ? "bg-brand text-brand-foreground" : "text-muted-foreground hover:bg-accent"
+                        }`}
+                      >
+                        <tab.icon className="h-3.5 w-3.5" />
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Tab content */}
+                {activeTab === "primary" && (
+                  <div className="space-y-3">
+                    {result.ads.map((ad, i) => (
+                      <AdCard
+                        key={ad.id}
+                        ad={ad}
+                        index={i}
+                        audit={result.audits[i]}
+                        copiedId={copiedId}
+                        onCopy={onCopy}
+                        onRegenerate={onRegenerate}
+                        onAutoFix={() => onAutoFix(i)}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {activeTab === "headlines" && (
+                  <div className="rounded-xl border border-border bg-card p-4">
+                    <h3 className="text-sm font-semibold mb-3">Titulos e Descricoes</h3>
+                    <div className="space-y-2">
+                      {result.ads.map((ad, i) => (
+                        <div key={ad.id} className="flex items-start gap-3 rounded-lg border border-border p-3">
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${RISK_STYLES[result.audits[i]?.riskLevel || "verde"].bg} ${RISK_STYLES[result.audits[i]?.riskLevel || "verde"].text}`}>
+                            {RISK_STYLES[result.audits[i]?.riskLevel || "verde"].label}
+                          </span>
+                          <div className="flex-1 min-w-0 space-y-1">
+                            <div className="text-xs text-muted-foreground">Headline ({ad.headline.length}/40)</div>
+                            <div className="text-sm font-medium">{ad.headline}</div>
+                            <div className="text-xs text-muted-foreground">Description ({ad.description.length}/30)</div>
+                            <div className="text-sm">{ad.description}</div>
+                            <div className="text-xs text-muted-foreground">CTA: {ad.cta}</div>
+                          </div>
+                          <button onClick={() => onCopy(`hd_${ad.id}`, `${ad.headline}\n${ad.description}\n${ad.cta}`)} className="shrink-0 rounded-md border border-border p-2 hover:bg-accent transition">
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {activeTab === "video" && (
+                  <div className="space-y-3">
+                    {extras && extras.videoScripts.length > 0 ? (
+                      extras.videoScripts.map((vs, i) => (
+                        <div key={i} className="rounded-xl border border-border bg-card p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-sm font-semibold flex items-center gap-2">
+                              <Video className="h-4 w-4 text-brand" />
+                              Roteiro {vs.durationSec}s
+                            </h3>
+                            <button onClick={() => onCopy(`vid_${i}`, vs.voiceover)} className="rounded-md border border-border p-2 hover:bg-accent transition">
+                              <Copy className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Hook (3s)</div>
+                            <p className="text-sm">{vs.hook}</p>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Cenas</div>
+                            <ol className="list-decimal list-inside text-sm space-y-1">
+                              {vs.scenes.map((s, j) => <li key={j}>{s}</li>)}
+                            </ol>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Voiceover</div>
+                            <p className="text-sm whitespace-pre-wrap">{vs.voiceover}</p>
+                          </div>
+                          {vs.onScreenText.length > 0 && (
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Texto na tela</div>
+                              <div className="flex flex-wrap gap-1">
+                                {vs.onScreenText.map((t, j) => <span key={j} className="rounded bg-muted/30 px-2 py-1 text-xs">{t}</span>)}
+                              </div>
+                            </div>
+                          )}
+                          <div className="text-xs text-muted-foreground">CTA: {vs.cta}</div>
+                        </div>
+                      ))
+                    ) : result.videoScripts.length > 0 ? (
+                      result.videoScripts.map((vs, i) => (
+                        <div key={i} className="rounded-xl border border-border bg-card p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-sm font-semibold flex items-center gap-2">
+                              <Video className="h-4 w-4 text-brand" />
+                              Roteiro {vs.durationSec}s
+                            </h3>
+                            <button onClick={() => onCopy(`vid_${i}`, vs.voiceover)} className="rounded-md border border-border p-2 hover:bg-accent transition">
+                              <Copy className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Hook (3s)</div>
+                            <p className="text-sm">{vs.hook}</p>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Cenas</div>
+                            <ol className="list-decimal list-inside text-sm space-y-1">
+                              {vs.scenes.map((s, j) => <li key={j}>{s}</li>)}
+                            </ol>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Voiceover</div>
+                            <p className="text-sm whitespace-pre-wrap">{vs.voiceover}</p>
+                          </div>
+                          {vs.onScreenText.length > 0 && (
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Texto na tela</div>
+                              <div className="flex flex-wrap gap-1">
+                                {vs.onScreenText.map((t, j) => <span key={j} className="rounded bg-muted/30 px-2 py-1 text-xs">{t}</span>)}
+                              </div>
+                            </div>
+                          )}
+                          <div className="text-xs text-muted-foreground">CTA: {vs.cta}</div>
+                        </div>
+                      ))
+                    ) : (
+                      <EmptyTab label={extrasLoading ? "Gerando roteiros..." : "Nenhum roteiro gerado. Clique em \"Gerar roteiros, publicos e plano de teste\"."} />
+                    )}
+                  </div>
+                )}
+
+                {activeTab === "creative" && (
+                  <div className="space-y-3">
+                    {result.creativeIdeas.length === 0 && <EmptyTab label="Nenhuma ideia gerada" />}
+                    {result.creativeIdeas.map((ci, i) => (
+                      <div key={i} className="rounded-xl border border-border bg-card p-4 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="rounded bg-brand/10 px-2 py-0.5 text-xs font-medium text-brand">{ci.format}</span>
+                        </div>
+                        <p className="text-sm">{ci.concept}</p>
+                        {ci.overlayText && <p className="text-xs text-muted-foreground">Overlay: "{ci.overlayText}"</p>}
+                        {ci.visualNotes && <p className="text-xs text-muted-foreground">Visual: {ci.visualNotes}</p>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {activeTab === "audiences" && (
+                  <div className="space-y-3">
+                    {extras && extras.audiences.length > 0 ? (
+                      extras.audiences.map((a, i) => (
+                        <div key={i} className="rounded-xl border border-border bg-card p-4 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-sm font-semibold">{a.name}</h3>
+                            <span className="rounded bg-muted/30 px-2 py-0.5 text-xs">{a.type}</span>
+                          </div>
+                          {a.interests.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {a.interests.map((int, j) => <span key={j} className="rounded bg-brand/10 px-2 py-0.5 text-xs text-brand">{int}</span>)}
+                            </div>
+                          )}
+                          {a.note && <p className="text-xs text-muted-foreground">{a.note}</p>}
+                        </div>
+                      ))
+                    ) : result.audiences.length > 0 ? (
+                      result.audiences.map((a, i) => (
+                        <div key={i} className="rounded-xl border border-border bg-card p-4 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-sm font-semibold">{a.name}</h3>
+                            <span className="rounded bg-muted/30 px-2 py-0.5 text-xs">{a.type}</span>
+                          </div>
+                          {a.interests.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {a.interests.map((int, j) => <span key={j} className="rounded bg-brand/10 px-2 py-0.5 text-xs text-brand">{int}</span>)}
+                            </div>
+                          )}
+                          {a.note && <p className="text-xs text-muted-foreground">{a.note}</p>}
+                        </div>
+                      ))
+                    ) : (
+                      <EmptyTab label={extrasLoading ? "Gerando publicos..." : "Nenhum publico gerado. Clique em \"Gerar roteiros, publicos e plano de teste\"."} />
+                    )}
+                  </div>
+                )}
+
+                {activeTab === "test" && (
+                  <div className="rounded-xl border border-border bg-card p-4">
+                    <h3 className="text-sm font-semibold mb-3">Plano de Teste</h3>
+                    {extras && extras.testPlan.length > 0 ? (
+                      <div className="space-y-2">
+                        {extras.testPlan.map((t, i) => (
+                          <div key={i} className="rounded-lg border border-border p-3 space-y-1">
+                            <div className="text-sm font-medium">{t.variable}</div>
+                            <div className="text-xs text-muted-foreground">Hipotese: {t.hypothesis}</div>
+                            <div className="text-xs text-muted-foreground">Metrica: {t.metric}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : result.testPlan.length > 0 ? (
+                      <div className="space-y-2">
+                        {result.testPlan.map((t, i) => (
+                          <div key={i} className="rounded-lg border border-border p-3 space-y-1">
+                            <div className="text-sm font-medium">{t.variable}</div>
+                            <div className="text-xs text-muted-foreground">Hipotese: {t.hypothesis}</div>
+                            <div className="text-xs text-muted-foreground">Metrica: {t.metric}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <EmptyTab label={extrasLoading ? "Gerando plano..." : "Nenhum plano gerado. Clique em \"Gerar roteiros, publicos e plano de teste\"."} />
+                    )}
+                  </div>
+                )}
+
+                {activeTab === "compliance" && (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                      Revise as politicas atuais da Meta antes de publicar. Esta ferramenta reduz o risco, mas nao garante aprovacao.
+                    </div>
+                    {result.ads.map((ad, i) => {
+                      const audit = result.audits[i];
+                      if (!audit || audit.flags.length === 0) return (
+                        <div key={ad.id} className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                          <div className="flex items-center gap-2 text-emerald-700">
+                            <CheckCircle2 className="h-4 w-4" />
+                            <span className="text-sm font-medium">Anuncio {i + 1}: Sem alertas</span>
+                          </div>
+                        </div>
+                      );
+                      return (
+                        <div key={ad.id} className="rounded-xl border border-border bg-card p-4 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${RISK_STYLES[audit.riskLevel].bg} ${RISK_STYLES[audit.riskLevel].text}`}>
+                              {RISK_STYLES[audit.riskLevel].label}
+                            </span>
+                            <span className="text-sm font-medium">Anuncio {i + 1}: {audit.flags.length} alerta(s)</span>
+                          </div>
+                          {audit.flags.map((flag, j) => <FlagRow key={j} flag={flag} />)}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+      </main>
+      <SiteFooter />
+    </div>
+  );
+}
+
+function InputField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-muted-foreground mb-1">{label}</span>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand"
+      />
+    </label>
+  );
+}
+
+function EmptyTab({ label }: { label: string }) {
+  return <p className="text-sm text-muted-foreground py-8 text-center">{label}</p>;
+}
+
+function FlagRow({ flag }: { flag: ComplianceFlag }) {
+  const severityColor = flag.severity === "high" ? "text-red-600" : flag.severity === "medium" ? "text-amber-600" : "text-muted-foreground";
+  return (
+    <div className="rounded-lg border border-border p-2 text-xs space-y-1">
+      <div className="flex items-center gap-2">
+        <span className={`font-bold ${severityColor}`}>{flag.severity.toUpperCase()}</span>
+        <span className="font-medium">"{flag.phrase}"</span>
+      </div>
+      <div className="text-muted-foreground">{flag.reason}</div>
+      <div className="text-muted-foreground">Sugestao: {flag.suggestion}</div>
+    </div>
+  );
+}
+
+function AdCard({
+  ad,
+  index,
+  audit,
+  copiedId,
+  onCopy,
+  onRegenerate,
+  onAutoFix,
+}: {
+  ad: AdCopy;
+  index: number;
+  audit?: { flags: ComplianceFlag[]; riskLevel: RiskLevel };
+  copiedId: string | null;
+  onCopy: (id: string, text: string) => void;
+  onRegenerate: () => void;
+  onAutoFix: () => void;
+}) {
+  const risk = audit?.riskLevel || "verde";
+  const riskStyle = RISK_STYLES[risk];
+  const fullText = `${ad.primaryText}\n\nHeadline: ${ad.headline}\nDescription: ${ad.description}\nCTA: ${ad.cta}`;
+  const segments = useMemo(() => highlightFlags(ad.primaryText, audit?.flags || []), [ad.primaryText, audit]);
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">Anuncio {index + 1}</span>
+          <span className="rounded bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground">{ad.angle}</span>
+          <span className="rounded bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground">{ad.length}</span>
+        </div>
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${riskStyle.bg} ${riskStyle.text}`}>{riskStyle.label}</span>
+      </div>
+
+      <div>
+        <div className="text-xs text-muted-foreground mb-1">Primary Text</div>
+        <p className="text-sm whitespace-pre-wrap">
+          {segments.map((seg, i) => seg.isFlagged
+            ? <mark key={i} className="bg-amber-200 rounded px-0.5">{seg.text}</mark>
+            : <span key={i}>{seg.text}</span>
+          )}
+        </p>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div>
+          <div className="text-xs text-muted-foreground">Headline ({ad.headline.length}/40)</div>
+          <div className="text-sm font-medium">{ad.headline}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Description ({ad.description.length}/30)</div>
+          <div className="text-sm">{ad.description}</div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span>CTA: <strong className="text-foreground">{ad.cta}</strong></span>
+        {ad.creativeIdea && <span className="hidden sm:inline">· {ad.creativeIdea}</span>}
+      </div>
+
+      <div className="flex items-center gap-2 pt-1 border-t border-border">
+        <button
+          type="button"
+          onClick={() => onCopy(ad.id, fullText)}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium transition hover:bg-accent"
+        >
+          {copiedId === ad.id ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+          {copiedId === ad.id ? "Copiado" : "Copiar"}
+        </button>
+        <button
+          type="button"
+          onClick={onRegenerate}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium transition hover:bg-accent"
+        >
+          <RefreshCw className="h-3.5 w-3.5" /> Regenerar
+        </button>
+        {audit && audit.flags.length > 0 && (
+          <button
+            type="button"
+            onClick={onAutoFix}
+            className="inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
+          >
+            <Wand2 className="h-3.5 w-3.5" /> Corrigir automaticamente
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,2 @@
+[functions.fetch-page]
+verify_jwt = false

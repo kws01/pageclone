@@ -1,0 +1,581 @@
+import { pickPlaybooks, mergePlaybooks, playbookToPrompt, listPlaybooks, PLAYBOOKS as PLAYBOOKS_REF, type RegulatedCategory, type Playbook } from "@/services/adPlaybooks";
+import { auditAdText, type VerifiedFacts, type AdAuditResult } from "@/services/adCompliance";
+import { callGeminiJson, isGeminiConfigured } from "@/services/geminiClient";
+
+export function isAiConfigured(): boolean {
+  return isGeminiConfigured();
+}
+
+export type AdObjective = "traffic" | "conversion";
+export type AdLength = "short" | "medium" | "long";
+
+export interface AdInput {
+  source: string;
+  productName: string;
+  niche: string;
+  language: string;
+  landingHeadline: string;
+  firstQuestion?: string;
+  benefits: string[];
+  painPoints: string[];
+  offerFacts?: {
+    price?: string;
+    guarantee?: string;
+    shipping?: string;
+    proofs?: string[];
+  };
+  ctaUrl?: string;
+  description?: string;
+}
+
+export interface AdBrief {
+  niche: string;
+  subniche: string;
+  language: string;
+  regulatedCategory: RegulatedCategory;
+  avatar: { summary: string; situations: string[] };
+  pains: string[];
+  desires: string[];
+  objections: string[];
+  emotionalTriggers: string[];
+  verifiedFacts: VerifiedFacts;
+  missingInfo: string[];
+}
+
+export interface AdAngle {
+  id: string;
+  name: string;
+  whyItFits: string;
+}
+
+export interface AdCopy {
+  id: string;
+  angle: string;
+  length: AdLength;
+  hook: string;
+  primaryText: string;
+  headline: string;
+  description: string;
+  cta: string;
+  creativeIdea: string;
+}
+
+export interface VideoScript {
+  durationSec: 15 | 30;
+  hook: string;
+  scenes: string[];
+  voiceover: string;
+  onScreenText: string[];
+  cta: string;
+}
+
+export interface CreativeIdea {
+  format: string;
+  concept: string;
+  overlayText: string;
+  visualNotes: string;
+}
+
+export interface Audience {
+  name: string;
+  type: "broad" | "interest";
+  interests: string[];
+  note: string;
+}
+
+export interface TestPlanItem {
+  variable: string;
+  hypothesis: string;
+  metric: string;
+}
+
+export interface AdGenerationResult {
+  brief: AdBrief;
+  angles: AdAngle[];
+  ads: AdCopy[];
+  videoScripts: VideoScript[];
+  creativeIdeas: CreativeIdea[];
+  audiences: Audience[];
+  testPlan: TestPlanItem[];
+  audits: AdAuditResult[];
+  playbookId: string;
+  secondaryPlaybookId?: string;
+  extraAvoid: string[];
+  usedFallback: boolean;
+  warning?: string;
+}
+
+const COMPLIANCE_RULES = `- Use exclusivamente informacoes do input e dos fatos verificados. NUNCA invente numeros, porcentagens, precos, prazos, quantidades de clientes, notas, datas, nomes, idades ou depoimentos.
+- Nao afirme atributos pessoais do leitor (condicao de saude, divida, peso, renda, idade). Prefira "Um jeito simples de..." / "Veja como..." / "Para quem quer...".
+- Sem antes e depois, sem resultado garantido, sem "cura/elimina/trata", sem promessas de renda, sem escassez ou urgencia falsa (nada de "so hoje", "ultimas unidades" ou datas).
+- Nao se apresente como site oficial nem use a marca do fabricante como se fosse a pagina do anuncio.
+- A promessa do anuncio deve bater com landingHeadline do quiz/pagina (coerencia de mensagem).
+- Cada anuncio deve ter angulo e tamanho diferentes; evite repeticao de ganchos.
+- Retorne SOMENTE JSON valido, no idioma pedido, em linguagem nativa e natural.`;
+
+const CTA_OPTIONS: Record<string, string[]> = {
+  pt: ["Saiba mais", "Comprar agora", "Cadastre-se", "Baixar"],
+  en: ["Learn More", "Shop Now", "Sign Up", "Download"],
+  es: ["Más información", "Comprar", "Registrarte", "Descargar"],
+};
+
+export function getCtaOptions(lang: string): string[] {
+  const l = lang.toLowerCase();
+  if (l.startsWith("pt")) return CTA_OPTIONS.pt;
+  if (l.startsWith("es")) return CTA_OPTIONS.es;
+  return CTA_OPTIONS.en;
+}
+
+export { listPlaybooks };
+
+function resolvePlaybook(input: AdInput, manualId?: string): { primary: Playbook; secondary?: Playbook } {
+  if (manualId) {
+    const all = Object.values(PLAYBOOKS_REF);
+    const found = all.find((p) => p.id === manualId);
+    if (found) {
+      const picked = pickPlaybooks({ niche: input.niche, productName: input.productName, description: input.description });
+      const secondary = picked.secondary && picked.secondary.id !== found.id ? picked.secondary : undefined;
+      return { primary: found, secondary };
+    }
+  }
+  return pickPlaybooks({ niche: input.niche, productName: input.productName, description: input.description });
+}
+
+function buildBriefPrompt(input: AdInput): string {
+  const factsStr = input.offerFacts
+    ? JSON.stringify(input.offerFacts)
+    : "{}";
+  return `You are a Meta Ads strategist. Build a structured brief for Facebook/Instagram ads.
+
+Product: ${input.productName}
+Niche: ${input.niche}
+Language: ${input.language}
+Landing headline: ${input.landingHeadline}
+First question (if quiz): ${input.firstQuestion || "N/A"}
+Benefits: ${input.benefits.join(" | ")}
+Pain points: ${input.painPoints.join(" | ")}
+Verified facts: ${factsStr}
+
+${COMPLIANCE_RULES}
+
+Return ONLY JSON:
+{
+  "niche": "string",
+  "subniche": "string",
+  "language": "${input.language}",
+  "regulatedCategory": "none|health|finance|beauty|supplement|income",
+  "avatar": { "summary": "who they are", "situations": ["3-4 relatable situations"] },
+  "pains": ["3-4 pains"],
+  "desires": ["3-4 desires"],
+  "objections": ["2-3 objections"],
+  "emotionalTriggers": ["3-4 triggers"],
+  "verifiedFacts": { "price": "", "guarantee": "", "shipping": "", "proofs": [] },
+  "missingInfo": ["what's missing — the AI must NOT fill these"]
+}`;
+}
+
+function buildAdsPrompt(brief: AdBrief, playbook: Playbook, playbookPrompt: string, input: AdInput, objective: AdObjective, tone: string, count: number, extraAvoid: string[]): string {
+  const ctas = getCtaOptions(input.language);
+  const extraAvoidLine = extraAvoid.length > 0 ? `\nADICIONALMENTE, NUNCA use estas palavras/expressoes: ${extraAvoid.join(" | ")}.` : "";
+  return `You are a Meta Ads copywriter. Generate ${count} ad variations for ${objective === "traffic" ? "traffic to a quiz" : "conversion to a landing page"}.
+
+Brief:
+${JSON.stringify(brief)}
+
+${playbookPrompt}${extraAvoidLine}
+
+Tone override (if provided): ${tone || "(use playbook tone)"}
+
+${COMPLIANCE_RULES}
+
+Character limits (STRICT):
+- headline: max 40 characters
+- description: max 30 characters
+- cta: must be one of: ${ctas.join(", ")}
+- hook: first ~125 chars of primaryText are decisive
+
+Return ONLY JSON:
+{
+  "angles": [{ "id": "a1", "name": "angle name", "whyItFits": "reason" }],
+  "ads": [{
+    "id": "ad1",
+    "angle": "a1",
+    "length": "short|medium|long",
+    "hook": "the opening hook",
+    "primaryText": "full primary text with hook on first line",
+    "headline": "max 40 chars",
+    "description": "max 30 chars",
+    "cta": "one of the allowed CTAs",
+    "creativeIdea": "visual concept"
+  }],
+  "videoScripts": [{
+    "durationSec": 15,
+    "hook": "first 3 seconds",
+    "scenes": ["scene descriptions"],
+    "voiceover": "full VO script",
+    "onScreenText": ["text overlays"],
+    "cta": "one of the allowed CTAs"
+  }],
+  "creativeIdeas": [{ "format": "static|carousel|video|story", "concept": "", "overlayText": "", "visualNotes": "" }],
+  "audiences": [{ "name": "", "type": "broad|interest", "interests": [], "note": "" }],
+  "testPlan": [{ "variable": "", "hypothesis": "", "metric": "" }]
+}
+
+Generate ${count} ads with different angles and lengths. Generate 2 video scripts (15s and 30s). Generate 3-4 creative ideas. Generate 3 audiences. Generate 3-4 test plan items.`;
+}
+
+function buildAuditPrompt(ads: AdCopy[], brief: AdBrief, lang: string): string {
+  return `You are a Meta Ads compliance auditor. Review these ads and rewrite ONLY high-risk phrases while preserving meaning.
+
+Ads:
+${JSON.stringify(ads.map((a) => ({ id: a.id, primaryText: a.primaryText, headline: a.headline, description: a.description })))}
+
+Brief:
+${JSON.stringify(brief)}
+
+Language: ${lang}
+
+${COMPLIANCE_RULES}
+
+For each ad, if it has high-risk phrases, return the rewritten version. If it's clean, return it unchanged.
+Return ONLY JSON array:
+[{ "id": "ad1", "primaryText": "rewritten", "headline": "rewritten", "description": "rewritten", "changed": true|false }]`;
+}
+
+function str(v: unknown, fallback = ""): string {
+  return typeof v === "string" ? v.trim() : fallback;
+}
+
+function arr(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x: unknown) => typeof x === "string").map((x: string) => x.trim()) : [];
+}
+
+function normalizeBrief(raw: unknown, input: AdInput): AdBrief {
+  const r = raw as Record<string, unknown>;
+  const vf = r.verifiedFacts as Record<string, unknown> | undefined;
+  return {
+    niche: str(r.niche, input.niche),
+    subniche: str(r.subniche, ""),
+    language: str(r.language, input.language),
+    regulatedCategory: (str(r.regulatedCategory, "none") as RegulatedCategory),
+    avatar: {
+      summary: str((r.avatar as Record<string, unknown>)?.summary, ""),
+      situations: arr((r.avatar as Record<string, unknown>)?.situations),
+    },
+    pains: arr(r.pains).length > 0 ? arr(r.pains) : input.painPoints,
+    desires: arr(r.desires),
+    objections: arr(r.objections),
+    emotionalTriggers: arr(r.emotionalTriggers),
+    verifiedFacts: {
+      price: str(vf?.price) || input.offerFacts?.price || "",
+      guarantee: str(vf?.guarantee) || input.offerFacts?.guarantee || "",
+      shipping: str(vf?.shipping) || input.offerFacts?.shipping || "",
+      proofs: arr(vf?.proofs).length > 0 ? arr(vf?.proofs) : input.offerFacts?.proofs || [],
+    },
+    missingInfo: arr(r.missingInfo),
+  };
+}
+
+function normalizeAds(raw: unknown, allowedCtas: string[], lang: string): { angles: AdAngle[]; ads: AdCopy[]; videoScripts: VideoScript[]; creativeIdeas: CreativeIdea[]; audiences: Audience[]; testPlan: TestPlanItem[] } {
+  const r = raw as Record<string, unknown>;
+  const rawAngles = Array.isArray(r.angles) ? r.angles : [];
+  const angles: AdAngle[] = rawAngles.map((a, i) => {
+    const ao = a as Record<string, unknown>;
+    return { id: str(ao.id, `a${i + 1}`), name: str(ao.name), whyItFits: str(ao.whyItFits) };
+  });
+
+  const rawAds = Array.isArray(r.ads) ? r.ads : [];
+  const ads: AdCopy[] = rawAds.map((a, i) => {
+    const ao = a as Record<string, unknown>;
+    const ctaRaw = str(ao.cta, allowedCtas[0]);
+    const cta = allowedCtas.includes(ctaRaw) ? ctaRaw : allowedCtas[0];
+    const headline = str(ao.headline).slice(0, 40);
+    const description = str(ao.description).slice(0, 30);
+    return {
+      id: str(ao.id, `ad${i + 1}`),
+      angle: str(ao.angle),
+      length: (str(ao.length) === "short" || str(ao.length) === "medium" || str(ao.length) === "long" ? str(ao.length) : "medium") as AdLength,
+      hook: str(ao.hook),
+      primaryText: str(ao.primaryText),
+      headline,
+      description,
+      cta,
+      creativeIdea: str(ao.creativeIdea),
+    };
+  }).filter((a) => a.primaryText);
+
+  const rawVideos = Array.isArray(r.videoScripts) ? r.videoScripts : [];
+  const videoScripts: VideoScript[] = rawVideos.map((v) => {
+    const vo = v as Record<string, unknown>;
+    const dur = vo.durationSec === 30 ? 30 : 15;
+    const ctaRaw = str(vo.cta, allowedCtas[0]);
+    return {
+      durationSec: dur as 15 | 30,
+      hook: str(vo.hook),
+      scenes: arr(vo.scenes),
+      voiceover: str(vo.voiceover),
+      onScreenText: arr(vo.onScreenText),
+      cta: allowedCtas.includes(ctaRaw) ? ctaRaw : allowedCtas[0],
+    };
+  }).filter((v) => v.hook || v.voiceover);
+
+  const rawCreatives = Array.isArray(r.creativeIdeas) ? r.creativeIdeas : [];
+  const creativeIdeas: CreativeIdea[] = rawCreatives.map((c) => {
+    const co = c as Record<string, unknown>;
+    return {
+      format: str(co.format, "static"),
+      concept: str(co.concept),
+      overlayText: str(co.overlayText),
+      visualNotes: str(co.visualNotes),
+    };
+  }).filter((c) => c.concept);
+
+  const rawAudiences = Array.isArray(r.audiences) ? r.audiences : [];
+  const audiences: Audience[] = rawAudiences.map((a) => {
+    const ao = a as Record<string, unknown>;
+    return {
+      name: str(ao.name),
+      type: (str(ao.type) === "broad" ? "broad" : "interest") as "broad" | "interest",
+      interests: arr(ao.interests),
+      note: str(ao.note),
+    };
+  }).filter((a) => a.name);
+
+  const rawTest = Array.isArray(r.testPlan) ? r.testPlan : [];
+  const testPlan: TestPlanItem[] = rawTest.map((t) => {
+    const to = t as Record<string, unknown>;
+    return {
+      variable: str(to.variable),
+      hypothesis: str(to.hypothesis),
+      metric: str(to.metric),
+    };
+  }).filter((t) => t.variable);
+
+  return { angles, ads, videoScripts, creativeIdeas, audiences, testPlan };
+}
+
+export interface GenerateAdsParams {
+  input: AdInput;
+  objective: AdObjective;
+  tone: string;
+  count?: number;
+  playbookId?: string;
+  extraAvoid?: string[];
+  brief?: AdBrief;
+  aiAudit?: boolean;
+}
+
+export async function generateAdBrief(input: AdInput, signal?: AbortSignal): Promise<AdBrief> {
+  const { primary: pickedPrimary, secondary: pickedSecondary } = resolvePlaybook(input);
+  const briefRaw = await callGeminiJson<unknown>(buildBriefPrompt(input), {
+    timeoutMs: 120000,
+    maxOutputTokens: 2500,
+    retries: 3,
+    label: "brief",
+    signal,
+  });
+  const brief = normalizeBrief(briefRaw, input);
+  brief.regulatedCategory = pickedPrimary.regulatedCategory;
+  return brief;
+}
+
+function buildExtrasPrompt(brief: AdBrief, ads: AdCopy[], input: AdInput): string {
+  const ctas = getCtaOptions(input.language);
+  return `You are a Meta Ads strategist. Generate video scripts, audiences, and a test plan for these ads.
+
+Brief:
+${JSON.stringify(brief)}
+
+Ads:
+${JSON.stringify(ads.map((a) => ({ id: a.id, angle: a.angle, headline: a.headline, primaryText: a.primaryText })))}
+
+Language: ${input.language}
+
+${COMPLIANCE_RULES}
+
+Return ONLY JSON:
+{
+  "videoScripts": [{ "durationSec": 15, "hook": "first 3 seconds", "scenes": ["scene descriptions"], "voiceover": "full VO script", "onScreenText": ["text overlays"], "cta": "one of: ${ctas.join(", ")}" }],
+  "audiences": [{ "name": "", "type": "broad|interest", "interests": [], "note": "" }],
+  "testPlan": [{ "variable": "", "hypothesis": "", "metric": "" }]
+}
+
+Generate 2 video scripts (15s and 30s). Generate 3 audiences. Generate 3-4 test plan items.`;
+}
+
+export async function generateAdExtras(brief: AdBrief, ads: AdCopy[], input: AdInput, signal?: AbortSignal): Promise<{ videoScripts: VideoScript[]; audiences: Audience[]; testPlan: TestPlanItem[] }> {
+  const allowedCtas = getCtaOptions(input.language);
+  const raw = await callGeminiJson<unknown>(buildExtrasPrompt(brief, ads, input), {
+    timeoutMs: 120000,
+    maxOutputTokens: 4500,
+    retries: 3,
+    label: "extras",
+    signal,
+  });
+  const { videoScripts, audiences, testPlan } = normalizeAds(raw, allowedCtas, input.language);
+  return { videoScripts, audiences, testPlan };
+}
+
+export async function generateAds(params: GenerateAdsParams): Promise<AdGenerationResult> {
+  const { input, objective, tone, playbookId, extraAvoid = [], aiAudit = false } = params;
+  const count = params.count ?? 4;
+  const { primary: pickedPrimary, secondary: pickedSecondary } = resolvePlaybook(input, playbookId);
+  const playbook = mergePlaybooks(pickedPrimary, pickedSecondary);
+  const allowedCtas = getCtaOptions(input.language);
+
+  if (!isAiConfigured()) {
+    return buildFallbackResult(input, playbook, allowedCtas, pickedPrimary.id, pickedSecondary?.id, extraAvoid);
+  }
+
+  try {
+    let brief: AdBrief;
+    if (params.brief) {
+      brief = params.brief;
+    } else {
+      brief = await generateAdBrief(input);
+    }
+
+    let primary = pickedPrimary;
+    let secondary = pickedSecondary;
+    if (!playbookId && brief.subniche) {
+      const repicked = resolvePlaybook({ ...input, niche: brief.niche });
+      primary = repicked.primary;
+      secondary = repicked.secondary;
+    }
+    const merged = mergePlaybooks(primary, secondary);
+    const finalPrompt = playbookToPrompt(merged, input.language);
+
+    const adsRaw = await callGeminiJson<unknown>(buildAdsPrompt(brief, merged, finalPrompt, input, objective, tone, count, extraAvoid), {
+      timeoutMs: 120000,
+      maxOutputTokens: 4500,
+      retries: 3,
+      label: "ads",
+    });
+    const { angles, ads } = normalizeAds(adsRaw, allowedCtas, input.language);
+
+    let finalAds = ads;
+    if (aiAudit) {
+      try {
+        const auditRaw = await callGeminiJson<unknown>(buildAuditPrompt(ads, brief, input.language), {
+          timeoutMs: 120000,
+          maxOutputTokens: 4096,
+          retries: 2,
+          label: "audit",
+        });
+        if (Array.isArray(auditRaw)) {
+          const rewrites = new Map<string, { primaryText?: string; headline?: string; description?: string }>();
+          for (const item of auditRaw) {
+            const io = item as Record<string, unknown>;
+            const id = str(io.id);
+            if (id && io.changed === true) {
+              rewrites.set(id, {
+                primaryText: str(io.primaryText) || undefined,
+                headline: str(io.headline) || undefined,
+                description: str(io.description) || undefined,
+              });
+            }
+          }
+          finalAds = ads.map((a) => {
+            const rw = rewrites.get(a.id);
+            if (!rw) return a;
+            return {
+              ...a,
+              primaryText: rw.primaryText || a.primaryText,
+              headline: (rw.headline || a.headline).slice(0, 40),
+              description: (rw.description || a.description).slice(0, 30),
+            };
+          });
+        }
+      } catch {
+        // AI audit is best-effort
+      }
+    }
+
+    const allAvoid = [...merged.avoidWords, ...extraAvoid];
+    const audits = finalAds.map((a) => auditAdText(`${a.primaryText} ${a.headline} ${a.description}`, input.language, brief.verifiedFacts, allAvoid));
+
+    const creativeIdeas: CreativeIdea[] = [];
+
+    return {
+      brief,
+      angles,
+      ads: finalAds,
+      videoScripts: [],
+      creativeIdeas,
+      audiences: [],
+      testPlan: [],
+      audits,
+      playbookId: primary.id,
+      secondaryPlaybookId: secondary?.id,
+      extraAvoid,
+      usedFallback: false,
+    };
+  } catch (err) {
+    return {
+      ...buildFallbackResult(input, playbook, allowedCtas, pickedPrimary.id, pickedSecondary?.id, extraAvoid),
+      warning: err instanceof Error ? err.message : "Erro ao gerar anuncios",
+    };
+  }
+}
+
+function buildFallbackResult(input: AdInput, playbook: Playbook, allowedCtas: string[], playbookId: string, secondaryPlaybookId: string | undefined, extraAvoid: string[]): AdGenerationResult {
+  const brief: AdBrief = {
+    niche: input.niche,
+    subniche: "",
+    language: input.language,
+    regulatedCategory: playbook.regulatedCategory,
+    avatar: { summary: "", situations: [] },
+    pains: input.painPoints.slice(0, 3),
+    desires: input.benefits.slice(0, 3),
+    objections: [],
+    emotionalTriggers: [],
+    verifiedFacts: {
+      price: input.offerFacts?.price || "",
+      guarantee: input.offerFacts?.guarantee || "",
+      shipping: input.offerFacts?.shipping || "",
+      proofs: input.offerFacts?.proofs || [],
+    },
+    missingInfo: ["Verificar preco, garantia e frete na pagina oficial"],
+  };
+
+  const hook = input.landingHeadline.slice(0, 120);
+  const primaryText = `${hook}\n\n${input.benefits.slice(0, 3).join("\n")}\n\n${input.painPoints.slice(0, 2).join("\n")}`;
+  const ads: AdCopy[] = [{
+    id: "ad1",
+    angle: "benefit-led",
+    length: "medium",
+    hook,
+    primaryText,
+    headline: input.productName.slice(0, 40),
+    description: input.benefits[0]?.slice(0, 30) || "",
+    cta: allowedCtas[0],
+    creativeIdea: "Produto em uso, lifestyle",
+  }];
+
+  const allAvoid = [...playbook.avoidWords, ...extraAvoid];
+  const audits = ads.map((a) => auditAdText(`${a.primaryText} ${a.headline} ${a.description}`, input.language, brief.verifiedFacts, allAvoid));
+
+  return {
+    brief,
+    angles: [{ id: "a1", name: "benefit-led", whyItFits: "Fallback angle" }],
+    ads,
+    videoScripts: [],
+    creativeIdeas: [],
+    audiences: [],
+    testPlan: [],
+    audits,
+    playbookId,
+    secondaryPlaybookId,
+    extraAvoid,
+    usedFallback: true,
+    warning: "IA indisponivel. Anuncio gerado com template basico.",
+  };
+}
+
+export function buildUtmUrl(base: string, campaign: string, content?: string): string {
+  if (!base) return "";
+  const sep = base.includes("?") ? "&" : "?";
+  const params = [`utm_source=facebook`, `utm_medium=paid_social`, `utm_campaign=${encodeURIComponent(campaign)}`];
+  if (content) params.push(`utm_content=${encodeURIComponent(content)}`);
+  return `${base}${sep}${params.join("&")}`;
+}

@@ -1,0 +1,88 @@
+import type { HybridNiche, ThemeConfig } from "@/types/hybridGuide";
+
+export const THEMES: Record<HybridNiche, ThemeConfig> = {
+  beauty: {
+    id: "beauty",
+    label: "Beleza & Estética Premium",
+    colors: {
+      background: "#FBF6F3",
+      surface: "#FFFFFF",
+      primary: "#9E4F5C",
+      primaryText: "#FFFFFF",
+      accent: "#C9A46A",
+      text: "#3A2A2E",
+      textMuted: "#7A6266",
+      border: "#EBD9D4",
+    },
+    fonts: {
+      heading: "'Playfair Display', Georgia, serif",
+      body: "'Inter', system-ui, sans-serif",
+      googleFontsUrl: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@600;700&display=swap",
+    },
+    radius: "20px",
+    shadow: "0 18px 40px -20px rgba(120, 72, 80, 0.35)",
+  },
+  health: {
+    id: "health",
+    label: "Saúde & Bem-Estar Clínico",
+    colors: {
+      background: "#F3FAF7",
+      surface: "#FFFFFF",
+      primary: "#2F7D5B",
+      primaryText: "#FFFFFF",
+      accent: "#8FD5B5",
+      text: "#1E3A30",
+      textMuted: "#4F6B60",
+      border: "#D5EBE2",
+    },
+    fonts: {
+      heading: "'Manrope', system-ui, sans-serif",
+      body: "'Manrope', system-ui, sans-serif",
+      googleFontsUrl: "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap",
+    },
+    radius: "14px",
+    shadow: "0 12px 30px -18px rgba(30, 58, 48, 0.3)",
+  },
+  finance: {
+    id: "finance",
+    label: "Finanças & Prosperidade",
+    colors: {
+      background: "#F5F7FB",
+      surface: "#FFFFFF",
+      primary: "#1B2A4A",
+      primaryText: "#FFFFFF",
+      accent: "#C9A24B",
+      text: "#14213D",
+      textMuted: "#4B5873",
+      border: "#DCE2EE",
+    },
+    fonts: {
+      heading: "'Source Serif 4', Georgia, serif",
+      body: "'Inter', system-ui, sans-serif",
+      googleFontsUrl: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Source+Serif+4:wght@600;700&display=swap",
+    },
+    radius: "10px",
+    shadow: "0 14px 32px -20px rgba(20, 33, 61, 0.4)",
+  },
+  relationship: {
+    id: "relationship",
+    label: "Relacionamento & Autoajuda",
+    colors: {
+      background: "#FBF4EE",
+      surface: "#FFFFFF",
+      primary: "#B5543A",
+      primaryText: "#FFFFFF",
+      accent: "#E0A46E",
+      text: "#3D2A22",
+      textMuted: "#6E5549",
+      border: "#EED9CB",
+    },
+    fonts: {
+      heading: "'Fraunces', Georgia, serif",
+      body: "'Nunito', system-ui, sans-serif",
+      googleFontsUrl: "https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Nunito:wght@400;500;600&display=swap",
+    },
+    radius: "18px",
+    shadow: "0 16px 34px -20px rgba(92, 52, 36, 0.35)",
+  },
+};
