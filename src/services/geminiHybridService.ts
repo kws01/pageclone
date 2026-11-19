@@ -135,7 +135,6 @@ function normalizeGuide(raw: unknown, input: HybridGuideInput): HybridGuideData 
     str(transition.body),
   ].join(" ");
   const contentLanguage = detectTextLanguage(sampleText) ?? input.detectedLanguage ?? "pt";
-  console.info("[hybrid-guide] idioma pedido:", input.detectedLanguage, "| idioma detectado no texto:", detectTextLanguage(sampleText), "| salvo:", contentLanguage);
 
   return {
     stageOrder: [...HYBRID_STAGE_IDS],

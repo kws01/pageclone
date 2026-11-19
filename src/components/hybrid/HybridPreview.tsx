@@ -121,8 +121,6 @@ export function HybridPreview({ guide }: HybridPreviewProps) {
             </button>
             <span className="text-xs" style={{ color: theme.colors.textMuted }}>
               {current + 1} / {screens.length}
-              {/* TEMPORARIO: depuracao de idioma, remover depois */}
-              <span className="ml-2 opacity-60"> lang: {guide.project.language}</span>
             </span>
             <button
               type="button"
