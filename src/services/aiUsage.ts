@@ -65,16 +65,3 @@ export function canCall(): { ok: boolean; waitMs: number } {
     return { ok: true, waitMs: 0 };
   }
 }
-
-export function getUsage(): { today: number; last60s: number } {
-  try {
-    const store = loadStore();
-    const now = Date.now();
-    const midnight = getLosAngelesMidnightMs();
-    const today = store.calls.filter((c) => c.ts >= midnight).length;
-    const last60s = store.calls.filter((c) => now - c.ts <= 60000).length;
-    return { today, last60s };
-  } catch {
-    return { today: 0, last60s: 0 };
-  }
-}

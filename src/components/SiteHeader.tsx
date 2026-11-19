@@ -13,7 +13,6 @@ export function SiteHeader() {
           <Link to="/quiz-funnel" className="hover:text-foreground">Funil de Descoberta</Link>
           <Link to="/hybrid-guide" className="hover:text-foreground">Hybrid Guide</Link>
           <Link to="/sales-page" className="hover:text-foreground">Pagina de Vendas</Link>
-          <Link to="/create-all" className="hover:text-foreground">Criar produto</Link>
           <Link to="/prompts" className="hover:text-foreground">Prompts</Link>
           <a href="/#features" className="hover:text-foreground">Recursos</a>
           <a href="/#faq" className="hover:text-foreground">FAQ</a>

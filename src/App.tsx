@@ -7,7 +7,6 @@ import EditorPage from "@/routes/editor";
 import QuizFunnelPage from "@/routes/quiz-funnel";
 import HybridGuidePage from "@/routes/hybrid-guide";
 import SalesPageGenerator from "@/routes/sales-page";
-import CreateAllPage from "@/routes/create-all";
 
 const PromptsPage = React.lazy(() => import("@/routes/prompts"));
 
@@ -32,7 +31,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
 
   handleClearAndReload = (): void => {
     try {
-      const keys = ["create-all-form", "create-all:headCode", "create-all:bodyCode"];
+      const keys = ["create-quiz-form", "create-all:headCode", "create-all:bodyCode"];
       keys.forEach((k) => localStorage.removeItem(k));
     } catch { /* ignore */ }
     window.location.reload();
@@ -81,9 +80,6 @@ function App() {
           <Route path="/quiz-funnel" element={<QuizFunnelPage />} />
           <Route path="/hybrid-guide" element={<HybridGuidePage />} />
           <Route path="/sales-page" element={<SalesPageGenerator />} />
-          <Route path="/create-all" element={<CreateAllPage />} />
-          <Route path="/criar-produto" element={<Navigate to="/create-all" replace />} />
-          <Route path="/criar-tudo" element={<Navigate to="/create-all" replace />} />
           <Route path="/prompts" element={<Suspense fallback={<div className="flex h-screen items-center justify-center text-muted-foreground">Carregando...</div>}><PromptsPage /></Suspense>} />
         </Routes>
       </BrowserRouter>
